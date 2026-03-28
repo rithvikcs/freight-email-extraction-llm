@@ -54,6 +54,38 @@ def load_port_reference() -> Dict[str, str]:
     return {port["code"]: port["name"] for port in ports}
 
 
+def safe_parse_json(response_text: str) -> Optional[Dict[str, Any]]:
+    """Safely extract and parse JSON from LLM response, fixing common issues."""
+    import re
+    try:
+        # Remove markdown code fences
+        response_text = re.sub(r"```(?:json)?", "", response_text, flags=re.IGNORECASE).strip()
+
+        # Find the first JSON object in text
+        start = response_text.find("{")
+        end = response_text.rfind("}")
+
+        if start == -1 or end == -1 or end < start:
+            print("\n❌ Invalid JSON boundaries")
+            print("RAW RESPONSE:\n", response_text)
+            return None
+
+        json_str = response_text[start:end+1]
+
+        # Remove trailing commas before closing braces/brackets
+        json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+
+        # Remove any non-printable/control characters
+        json_str = re.sub(r"[\x00-\x1f\x7f]", "", json_str)
+
+        return json.loads(json_str)
+
+    except Exception as e:
+        print("\n❌ JSON parsing failed:", e)
+        print("RAW RESPONSE:\n", response_text)
+        return None
+
+
 def extract_with_groq(
     email_id: str, subject: str, body: str, prompt_version: str = "v2"
 ) -> Optional[Dict[str, Any]]:
@@ -65,10 +97,10 @@ def extract_with_groq(
 
     client = Groq(api_key=GROQ_API_KEY)
     prompt = get_extraction_prompt(version=prompt_version, subject=subject, body=body)
+    # prompt = prompt + f'\nInclude this field: "id": "{email_id}"'
 
     # Replace email ID placeholder
     if "{id}" in prompt or "EMAIL_ID" in prompt:
-        # The prompt template will use the actual email ID
         prompt = prompt.replace("EMAIL_ID", email_id)
 
     for attempt in range(MAX_RETRIES):
@@ -81,63 +113,38 @@ def extract_with_groq(
                 ],
                 temperature=TEMPERATURE,
             )
-            print(f"DEBUG: API call successful for {email_id}")
 
-            # Extract JSON response
+            print(f"\n✅ API call successful for {email_id}")
+
             response_text = response.choices[0].message.content.strip()
-            print(f"DEBUG: Raw response for {email_id}: {repr(response_text[:200])}")
 
-            # Try to parse JSON from response
-            try:
-                # Handle markdown code blocks if present
-                if response_text.startswith("```"):
-                    # Extract content between ``` markers
-                    parts = response_text.split("```")
-                    for part in parts:
-                        part = part.strip()
-                        if part.startswith("{") and part.endswith("}"):
-                            response_text = part
-                            break
-                        elif part.startswith("json") and "{" in part:
-                            # Remove "json" prefix if present
-                            part = part.replace("json", "", 1).strip()
-                            if part.startswith("{"):
-                                response_text = part
-                                break
+            # 🔥 FULL DEBUG (VERY IMPORTANT)
+            print("\n================ FULL LLM RESPONSE ================\n")
+            print(response_text)
+            print("\n==================================================\n")
 
-                # Try to find JSON object in response (in case there's extra text)
-                json_start = response_text.find("{")
-                json_end = response_text.rfind("}") + 1
+            # 🔧 SAFE PARSE
+            result = safe_parse_json(response_text)
 
-                if json_start != -1 and json_end > json_start:
-                    json_content = response_text[json_start:json_end]
-                    # Clean up any trailing commas or extra text
-                    json_content = json_content.rstrip(", \n\t")
-                    if json_content.endswith("},"):
-                        json_content = json_content[:-1]
-                    result = json.loads(json_content)
-                else:
-                    result = json.loads(response_text)
-
-                result["id"] = email_id  # Ensure correct ID
-                return result
-
-            except json.JSONDecodeError as e:
-                print(f"  ⚠️  Failed to parse JSON for {email_id}: {e}")
-                print(f"     Response: {response_text[:300]}...")
+            if not result:
+                print(f"❌ Skipping {email_id} due to invalid JSON")
                 return None
+
+            result["id"] = email_id
+            return result
 
         except Exception as e:
-            print(f"  ❌ Unexpected error for {email_id} (attempt {attempt + 1}): {type(e).__name__}: {e}")
-            # Print more debug info
+            print(f"\n❌ Unexpected error for {email_id} (attempt {attempt + 1}): {type(e).__name__}: {e}")
+
             try:
-                print(f"     Response object: {response}")
                 if hasattr(response, 'choices') and response.choices:
-                    print(f"     Message content: {repr(response.choices[0].message.content[:100])}")
+                    print("PARTIAL RESPONSE:", response.choices[0].message.content[:200])
             except:
-                print("     Could not print response details")
+                pass
+
             if attempt == MAX_RETRIES - 1:
                 return None
+
             time.sleep(RETRY_DELAY)
 
     return None

@@ -84,28 +84,36 @@ CRITICAL RULES:
    - Multiple shipments → extract FIRST one only
    - Multiple origin/destination pairs → use origin→destination pair, not transshipment ports
 
-Extract the shipment details and respond with ONLY a JSON code block like this:
+Extract the shipment details
 
-```json
+Respond with ONLY a valid JSON object.
+
+STRICT REQUIREMENTS:
+- No markdown
+- No code blocks
+- No explanations
+- No trailing commas
+- All fields must follow valid JSON syntax
+
+Output format:
 {
-  "product_line": "pl_sea_import_lcl",
-  "origin_port_code": "HKHKG",
-  "origin_port_name": "Hong Kong",
-  "destination_port_code": "INMAA",
-  "destination_port_name": "Chennai",
-  "incoterm": "FOB",
-  "cargo_weight_kg": null,
-  "cargo_cbm": 5.0,
-  "is_dangerous": false
+  "id": "EMAIL_ID",
+  "product_line": "pl_sea_import_lcl" or "pl_sea_export_lcl" or null,
+  "origin_port_code": "XXXXX" or null,
+  "origin_port_name": "string" or null,
+  "destination_port_code": "XXXXX" or null,
+  "destination_port_name": "string" or null,
+  "incoterm": "FOB" or other or null,
+  "cargo_weight_kg": number or null,
+  "cargo_cbm": number or null,
+  "is_dangerous": boolean
 }
-```
 
 Email:
 Subject: {subject}
 Body: {body}
 
-```json
-"""
+JSON:"""
 
 
 def get_extraction_prompt(version: str = "v2", subject: str = "", body: str = "") -> str:
