@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
+import traceback
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -27,7 +28,9 @@ RETRY_DELAY = 2  # seconds
 # Paths (relative to parent directory)
 PARENT_DIR = Path(__file__).parent.parent
 EMAILS_INPUT_FILE = PARENT_DIR / "emails_input.json"
+print("email path", EMAILS_INPUT_FILE)
 PORT_CODES_FILE = PARENT_DIR / "port_codes_reference.json"
+print("port codes", PORT_CODES_FILE)
 OUTPUT_FILE = Path(__file__).parent / "output.json"
 
 # Global rate limit tracker
@@ -43,15 +46,22 @@ def load_emails() -> List[Dict[str, Any]]:
 
 
 def load_port_reference() -> Dict[str, str]:
-    """Load port codes reference. Returns dict {code: name}."""
-    if not PORT_CODES_FILE.exists():
-        raise FileNotFoundError(
-            f"port_codes_reference.json not found at {PORT_CODES_FILE}"
-        )
+    """Returns both code->name AND name->code mappings."""
     with open(PORT_CODES_FILE, "r") as f:
         ports = json.load(f)
-    # Create {code: name} mapping
-    return {port["code"]: port["name"] for port in ports}
+    
+    code_to_names = {}  # code → list of all valid names
+    name_to_code = {}   # name (lowercase) → code
+    
+    for port in ports:
+        code = port["code"]
+        name = port["name"]
+        if code not in code_to_names:
+            code_to_names[code] = []
+        code_to_names[code].append(name)
+        name_to_code[name.lower()] = code
+    
+    return code_to_names, name_to_code
 
 
 def safe_parse_json(response_text: str) -> Optional[Dict[str, Any]]:
@@ -60,6 +70,9 @@ def safe_parse_json(response_text: str) -> Optional[Dict[str, Any]]:
     try:
         # Remove markdown code fences
         response_text = re.sub(r"```(?:json)?", "", response_text, flags=re.IGNORECASE).strip()
+
+        response_text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", response_text)
+        response_text = response_text.replace("\r\n", "\n").replace("\r", "\n")
 
         # Find the first JSON object in text
         start = response_text.find("{")
@@ -76,7 +89,7 @@ def safe_parse_json(response_text: str) -> Optional[Dict[str, Any]]:
         json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
 
         # Remove any non-printable/control characters
-        json_str = re.sub(r"[\x00-\x1f\x7f]", "", json_str)
+        # json_str = re.sub(r"[\x00-\x1f\x7f]", "", json_str)
 
         return json.loads(json_str)
 
@@ -87,7 +100,7 @@ def safe_parse_json(response_text: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_with_groq(
-    email_id: str, subject: str, body: str, prompt_version: str = "v2"
+    email_id: str, subject: str, body: str, port_reference: Dict[str, str], prompt_version: str = "v2"
 ) -> Optional[Dict[str, Any]]:
     """Call Groq API to extract shipment data from email."""
     if not GROQ_API_KEY:
@@ -96,12 +109,17 @@ def extract_with_groq(
         )
 
     client = Groq(api_key=GROQ_API_KEY)
-    prompt = get_extraction_prompt(version=prompt_version, subject=subject, body=body)
+    prompt = get_extraction_prompt(
+        version=prompt_version, 
+        subject=subject, 
+        body=body,
+        port_reference=port_reference
+    )
     # prompt = prompt + f'\nInclude this field: "id": "{email_id}"'
 
     # Replace email ID placeholder
-    if "{id}" in prompt or "EMAIL_ID" in prompt:
-        prompt = prompt.replace("EMAIL_ID", email_id)
+    # if "{id}" in prompt or "EMAIL_ID" in prompt:
+    #     prompt = prompt.replace("EMAIL_ID", email_id)
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -135,6 +153,7 @@ def extract_with_groq(
 
         except Exception as e:
             print(f"\n❌ Unexpected error for {email_id} (attempt {attempt + 1}): {type(e).__name__}: {e}")
+            traceback.print_exc()
 
             try:
                 if hasattr(response, 'choices') and response.choices:
@@ -150,18 +169,30 @@ def extract_with_groq(
     return None
 
 
-def enrich_with_port_names(
-    extraction: Dict[str, Any], port_reference: Dict[str, str]
-) -> Dict[str, Any]:
-    """Fill in port names from reference using extracted port codes."""
-    if extraction.get("origin_port_code"):
-        code = extraction["origin_port_code"]
-        extraction["origin_port_name"] = port_reference.get(code)
-
-    if extraction.get("destination_port_code"):
-        code = extraction["destination_port_code"]
-        extraction["destination_port_name"] = port_reference.get(code)
-
+def enrich_with_port_names(extraction, code_to_names, name_to_code):
+    for code_field, name_field in [
+        ("origin_port_code", "origin_port_name"),
+        ("destination_port_code", "destination_port_name")
+    ]:
+        code = extraction.get(code_field)
+        llm_name = extraction.get(name_field, "")
+        
+        # Validate code exists in reference
+        if code and code not in code_to_names:
+            extraction[code_field] = None
+            extraction[name_field] = None
+            continue
+        
+        if code:
+            valid_names = code_to_names[code]
+            # Try to match LLM's name against valid names for this code
+            llm_lower = (llm_name or "").lower().strip()
+            matched = next((n for n in valid_names if n.lower() == llm_lower), None)
+            # Use matched name if found, otherwise use first valid name
+            extraction[name_field] = matched if matched else valid_names[0]
+        else:
+            extraction[name_field] = None
+    
     return extraction
 
 
@@ -176,14 +207,12 @@ def validate_extraction(extraction: Dict[str, Any]) -> Optional[ShipmentExtracti
         return None
 
 
-def process_emails(
-    prompt_version: str = "v2", max_emails: Optional[int] = None
-) -> List[Dict[str, Any]]:
+def process_emails(prompt_version: str = "v2", max_emails: Optional[int] = None) -> List[Dict[str, Any]]:
     """Process all emails and generate extractions."""
     print(f"\n🚀 Starting extraction (prompt version: {prompt_version})...\n")
 
     emails = load_emails()
-    port_reference = load_port_reference()
+    code_to_names, name_to_code  = load_port_reference()
 
     if max_emails:
         emails = emails[:max_emails]
@@ -202,7 +231,7 @@ def process_emails(
         print(f"[{i}/{len(emails)}] Processing {email_id}...", end=" ")
 
         # Extract from LLM
-        extraction = extract_with_groq(email_id, subject, body, prompt_version)
+        extraction = extract_with_groq(email_id, subject, body, code_to_names, prompt_version)
 
         if not extraction:
             print("❌ Failed")
@@ -210,7 +239,7 @@ def process_emails(
             continue
 
         # Enrich with port names
-        extraction = enrich_with_port_names(extraction, port_reference)
+        extraction = enrich_with_port_names(extraction, code_to_names, name_to_code)
 
         # Validate
         validated = validate_extraction(extraction)
@@ -252,6 +281,7 @@ def main():
         sys.exit(1)
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 

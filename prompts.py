@@ -24,7 +24,7 @@ Business Rules:
 8. Conflicts: Body takes precedence over subject
 
 Return a JSON object with these fields:
-{
+{{
   "id": "EMAIL_ID",
   "product_line": "pl_sea_import_lcl" or "pl_sea_export_lcl" or null,
   "origin_port_code": "XXXXX" or null,
@@ -35,7 +35,8 @@ Return a JSON object with these fields:
   "cargo_weight_kg": float or null,
   "cargo_cbm": float or null,
   "is_dangerous": boolean
-}
+}}
+  
 
 Email:
 Subject: {subject}
@@ -96,7 +97,7 @@ STRICT REQUIREMENTS:
 - All fields must follow valid JSON syntax
 
 Output format:
-{
+{{
   "id": "EMAIL_ID",
   "product_line": "pl_sea_import_lcl" or "pl_sea_export_lcl" or null,
   "origin_port_code": "XXXXX" or null,
@@ -107,7 +108,7 @@ Output format:
   "cargo_weight_kg": number or null,
   "cargo_cbm": number or null,
   "is_dangerous": boolean
-}
+}}
 
 Email:
 Subject: {subject}
@@ -116,11 +117,12 @@ Body: {body}
 JSON:"""
 
 
-def get_extraction_prompt(version: str = "v2", subject: str = "", body: str = "") -> str:
+def get_extraction_prompt(version: str = "v2", subject: str = "", body: str = "", port_reference: dict = {}) -> str:
+    port_list = "\n".join([f"  {code}: {names[0]}" for code, names in sorted(port_reference.items())])
     if version == "v1":
         template = EXTRACTION_PROMPT_V1
     elif version == "v2":
         template = EXTRACTION_PROMPT_V2
     else:
         template = EXTRACTION_PROMPT_V2  # Default to latest
-    return template.format(subject=subject, body=body)
+    return template.format(subject=subject, body=body, port_list=port_list)
