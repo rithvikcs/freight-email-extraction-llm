@@ -207,30 +207,6 @@ FOB, CIF, CFR, EXW, DDP, DAP, FCA, CPT, CIP, DPU
 - Processing 50 emails: 5-10 minutes (due to rate limits)
 - Each successful extraction: ~1-3 seconds
 
----
-
-## System Design Questions
-
-### 1. Scale: 10,000 emails/day within 5 minutes, $500/month budget
-
-Use an async queue-based architecture. Emails land in an SQS queue; a pool of workers (AWS Lambda or small EC2 instances) consume from the queue and call the LLM API in parallel. At 10,000 emails/day (~7/minute average), bursts can be handled by scaling workers horizontally. Groq's free tier won't scale here — switch to a paid LLM provider (OpenAI, Anthropic, or Groq Dev tier) with higher rate limits. At ~$0.001/email for a fast model, 10,000 emails/day costs ~$10/day ($300/month), well within the $500 budget with room for infra costs.
-
-For 99% processed within 5 minutes: prioritise queue depth monitoring with CloudWatch alarms. If depth exceeds a threshold, auto-scale workers. Store results in a database (DynamoDB or Postgres) and expose a status API. Failed emails after 3 retries go to a dead-letter queue for manual review.
-
-### 2. Monitoring: Accuracy drops from 90% to 70% over a week
-
-Detection: run `evaluate.py` on a sample of recent extractions against a held-out labelled set daily. Alert when field-level accuracy drops more than 5% from baseline. Track per-field metrics separately — a drop in only `origin_port_code` points to a different root cause than a drop in `incoterm`.
-
-Investigation process: (1) pull the failing emails and look for patterns — new port names, new incoterm formats, new email templates from senders; (2) check if the LLM API changed (model update, temperature drift); (3) check if input data distribution shifted (new origin countries, new commodity types). Fix by updating the prompt with new examples covering the failing patterns and re-running evaluation.
-
-### 3. Multilingual: 30% Mandarin, 20% Hindi
-
-For Mandarin: LLaMA 3.3 70B handles Chinese reasonably well. Add Chinese port name mappings to the prompt (e.g. 上海 → CNSHA, 香港 → HKHKG). Test with a labelled Mandarin sample and add few-shot examples in Chinese. For Hindi: similar approach but Hindi freight emails often mix English for port names and incoterms, so the extraction rules may transfer with minimal changes.
-
-Evaluation: create separate ground truth sets per language. Track accuracy independently — a model that is 90% on English but 50% on Mandarin needs language-specific prompt tuning. Consider language detection as a pre-processing step to route emails to language-specific prompt variants.
-
----
-
 ## Troubleshooting
 
 ### "GROQ_API_KEY not set"
