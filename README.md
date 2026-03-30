@@ -207,6 +207,8 @@ FOB, CIF, CFR, EXW, DDP, DAP, FCA, CPT, CIP, DPU
 - Processing 50 emails: 5-10 minutes (due to rate limits)
 - Each successful extraction: ~1-3 seconds
 
+---
+
 ## Troubleshooting
 
 ### "GROQ_API_KEY not set"
